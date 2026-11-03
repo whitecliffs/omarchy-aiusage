@@ -65,6 +65,14 @@ omarchy plugin update jim.aiusage
 
 If a UI change does not appear after updating, run `omarchy restart shell` to clear a stale widget instance.
 
+## Remove
+
+```sh
+omarchy plugin remove jim.aiusage
+```
+
+This removes the plugin and its bar entry. Your provider logins, OpenRouter key file, and usage cache are kept. The cache is stored at `$XDG_CACHE_HOME/omarchy-aiusage` (normally `~/.cache/omarchy-aiusage`).
+
 ## Checks
 
 ```sh
