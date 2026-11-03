@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "jim.aiusage",
   "name": "AI Usage",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "Jim",
   "license": "MIT",
   "description": "Live usage for your AI subscriptions in the bar: Claude, OpenAI (ChatGPT/Codex), OpenCode Go/Zen, Antigravity, Conductor (AI Junction) and OpenRouter, with a tabbed popup and a setup tab to pick what to track.",

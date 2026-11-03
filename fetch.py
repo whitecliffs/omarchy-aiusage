@@ -23,6 +23,7 @@ Security: tokens are read from the tools' own credential files, sent only to
 that tool's own API, and never printed or logged.
 """
 import base64
+import fcntl
 import json
 import hashlib
 import os
@@ -131,6 +132,42 @@ def err_for(status, name):
 
 
 # --------------------------------------------------------------------- Claude
+def _claude_credentials_path():
+    return os.path.join(os.environ.get("CLAUDE_CONFIG_DIR", os.path.join(HOME, ".claude")), ".credentials.json")
+
+
+def _claude_refresh_oauth(previous, force=False):
+    # Let Claude Code perform token rotation and persist its own login. A lock
+    # serializes helper instances, and re-reading avoids refreshing an old token.
+    os.makedirs(CACHE, exist_ok=True)
+    fd = os.open(os.path.join(CACHE, "claude-refresh.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "r+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        current = (read_json(_claude_credentials_path()) or {}).get("claudeAiOauth") or {}
+        if current.get("accessToken") != previous.get("accessToken"):
+            return current
+        expires = current.get("expiresAt") or 0
+        if not force and current.get("accessToken") and expires > (now() + 60) * 1000:
+            return current
+        refresh = current.get("refreshToken")
+        scopes = current.get("scopes")
+        if not refresh or not isinstance(scopes, list) or not scopes:
+            return current
+        env = dict(os.environ)
+        env["CLAUDE_CODE_OAUTH_REFRESH_TOKEN"] = refresh
+        env["CLAUDE_CODE_OAUTH_SCOPES"] = " ".join(scopes)
+        if current.get("clientId"):
+            env["CLAUDE_CODE_OAUTH_CLIENT_ID"] = current["clientId"]
+        try:
+            # These environment variables select the CLI's non-interactive
+            # refresh flow. Secrets never enter arguments or helper output.
+            subprocess.run(["claude", "auth", "login", "--claudeai"], env=env,
+                           input="", capture_output=True, text=True, timeout=45, cwd=HOME)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return (read_json(_claude_credentials_path()) or {}).get("claudeAiOauth") or current
+
+
 def claude(_opts):
     os.makedirs(CACHE, exist_ok=True)
     cache_file = os.path.join(CACHE, "claude.json")
@@ -139,11 +176,14 @@ def claude(_opts):
     # If recent fresh cache exists (< 60s), reuse it to avoid Anthropic rate limits
     cached = read_json(cache_file)
     if cached and isinstance(cached, dict) and cached.get("ok") and not cached.get("stale"):
-        if now() - cached.get("fetchedAt", 0) < 60:
+        if not _opts.get("forceRefresh") and now() - cached.get("fetchedAt", 0) < 60:
             return cached
 
-    cred = read_json(os.path.join(HOME, ".claude", ".credentials.json"))
+    cred = read_json(_claude_credentials_path())
     oauth = (cred or {}).get("claudeAiOauth") or {}
+    exp = oauth.get("expiresAt") or 0
+    if oauth.get("refreshToken") and (not oauth.get("accessToken") or (exp and exp < (now() + 60) * 1000)):
+        oauth = _claude_refresh_oauth(oauth)
     token = oauth.get("accessToken")
     plan = str(oauth.get("subscriptionType") or "").capitalize()
 
@@ -158,16 +198,22 @@ def claude(_opts):
     if exp and exp / 1000 < now():
         if cached and cached.get("windows"):
             cached["stale"] = True
-            cached["hint"] = "Claude login token has expired; start Claude Code once to refresh."
+            cached["hint"] = "Claude login renewal failed; sign in again in Claude Code. Showing last reading."
             return cached
-        return fail("Claude login token has expired",
-                    "Open Claude Code once (`claude`) - it refreshes the token itself.")
+        return fail("Claude login renewal failed",
+                    "Sign in again in Claude Code to replace the expired login.")
 
-    status, data = http_json("https://api.anthropic.com/api/oauth/usage", {
+    headers = {
         "Authorization": "Bearer " + token,
         "anthropic-beta": "oauth-2025-04-20",
         "User-Agent": "claude-code/2.0",
-    })
+    }
+    status, data = http_json("https://api.anthropic.com/api/oauth/usage", headers)
+    if status == 401 and oauth.get("refreshToken"):
+        renewed = _claude_refresh_oauth(oauth, force=True)
+        if renewed.get("accessToken") and renewed["accessToken"] != token:
+            headers["Authorization"] = "Bearer " + renewed["accessToken"]
+            status, data = http_json("https://api.anthropic.com/api/oauth/usage", headers)
 
     if status == 200 and isinstance(data, dict):
         wins = []
@@ -256,7 +302,7 @@ def openai(_opts):
 
     cached = read_json(cache_file)
     if cached and isinstance(cached, dict) and cached.get("ok") and not cached.get("stale"):
-        if now() - cached.get("fetchedAt", 0) < 60:
+        if not _opts.get("forceRefresh") and now() - cached.get("fetchedAt", 0) < 60:
             return cached
 
     auth = read_json(os.path.join(HOME, ".codex", "auth.json"))
@@ -323,16 +369,22 @@ def openai(_opts):
 def opencode(_opts):
     cache_file = os.path.join(CACHE, "opencode.json")
     cached = read_json(cache_file)
-    if cached and cached.get("ok") and not cached.get("stale") and now() - cached.get("fetchedAt", 0) < 60:
+    if cached and cached.get("ok") and not cached.get("stale") and not _opts.get("forceRefresh") and now() - cached.get("fetchedAt", 0) < 60:
         return cached
-    try:
-        proc = subprocess.run(
-            ["opencode", "api", "get", "/api/experimental/usage/limits"],
-            capture_output=True, text=True, timeout=30)
-        payload = json.loads(proc.stdout) if proc.returncode == 0 else {}
-        data = payload.get("data") or {}
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        data = {}
+    data = {}
+    for standalone in (False, True):
+        command = ["opencode", "api", "get", "/api/experimental/usage/limits"]
+        if standalone:
+            command.append("--standalone")
+        try:
+            proc = subprocess.run(command, capture_output=True, text=True, timeout=45, cwd=HOME)
+            payload = json.loads(proc.stdout) if proc.returncode == 0 else {}
+            candidate = payload.get("data") if isinstance(payload, dict) else None
+            if isinstance(candidate, dict) and (candidate.get("go") or candidate.get("budgets")):
+                data = candidate
+                break
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            continue
 
     wins = []
     go = data.get("go") or {}
@@ -374,7 +426,7 @@ def openrouter(opts):
 
     cached = read_json(cache_file)
     if cached and isinstance(cached, dict) and cached.get("ok") and not cached.get("stale"):
-        if now() - cached.get("fetchedAt", 0) < 60:
+        if not opts.get("forceRefresh") and now() - cached.get("fetchedAt", 0) < 60:
             return cached
 
     key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_KEY") or ""
@@ -608,7 +660,7 @@ def antigravity(_opts):
     # If recent fresh cache exists (< 60s), reuse it
     cached = read_json(cache_file)
     if cached and isinstance(cached, dict) and cached.get("ok") and not cached.get("stale") and cached.get("quotaUserAgent") == ANTIGRAVITY_USER_AGENT:
-        if now() - cached.get("fetchedAt", 0) < 60:
+        if not _opts.get("forceRefresh") and now() - cached.get("fetchedAt", 0) < 60:
             return cached
 
     token = _ag_get_token()
@@ -693,14 +745,35 @@ def _conductor_token():
         return ""
 
 
+def _conductor_active_account():
+    # The app API can use a session-only login that differs from the keyring.
+    # Its launch token is sent only to the loopback port recorded by Conductor.
+    directory = os.path.join(HOME, ".conductor")
+    try:
+        with open(os.path.join(directory, "server-port")) as f:
+            port = int(f.read(16).strip())
+        with open(os.path.join(directory, "launch-token")) as f:
+            token = f.read(4096).strip()
+        if not 1 <= port <= 65535 or not token:
+            return 0, None
+    except (OSError, ValueError):
+        return 0, None
+    return http_json("http://127.0.0.1:%d/api/providers/aijunction/account" % port,
+                     {"Authorization": "Bearer " + token})
+
+
 def conductor(_opts):
     cache_file = os.path.join(CACHE, "conductor.json")
     cached = read_json(cache_file)
-    if cached and cached.get("ok") and not cached.get("stale") and now() - cached.get("fetchedAt", 0) < 60:
+    if cached and cached.get("ok") and not cached.get("stale") and not _opts.get("forceRefresh") and now() - cached.get("fetchedAt", 0) < 60:
         return cached
     token = _conductor_token()
     status, data = http_json("https://api.aijunction.dev/account",
                              {"Authorization": "Bearer " + token}) if token else (401, None)
+    if not token or status in (0, 401, 403):
+        app_status, app_data = _conductor_active_account()
+        if app_status == 200:
+            status, data = app_status, app_data
     user = data.get("user") if isinstance(data, dict) else None
     credits = user.get("credits") if isinstance(user, dict) else None
     try:
@@ -713,11 +786,15 @@ def conductor(_opts):
                      hint="Subscription and top-up credits share this balance.")
         write_json(cache_file, res)
         return res
+    login_hint = "Sign in to AI Junction again in Conductor and save the login."
     if cached and cached.get("ok"):
-        cached.update(stale=True, hint="AI Junction balance unavailable; showing last reading.")
+        hint = "AI Junction login expired. " + login_hint if status in (401, 403) else "AI Junction balance unavailable."
+        cached.update(stale=True, hint=hint + " Showing last reading.")
         return cached
     if not token:
-        return fail("No saved AI Junction login", "Sign in to AI Junction in Conductor and save the login.")
+        return fail("No AI Junction login available", login_hint)
+    if status in (401, 403):
+        return fail("AI Junction login expired", login_hint)
     return fail(err_for(status, "AI Junction") if status != 200 else "AI Junction returned no balance",
                 "Check your AI Junction login in Conductor.")
 
@@ -726,14 +803,14 @@ def conductor(_opts):
 def detect(_opts):
     def has(p):
         return os.path.exists(os.path.join(HOME, p))
-    cl = (read_json(os.path.join(HOME, ".claude", ".credentials.json")) or {}).get("claudeAiOauth") or {}
+    cl = (read_json(_claude_credentials_path()) or {}).get("claudeAiOauth") or {}
     ag = has(".gemini/oauth_creds.json") or has(".gemini/antigravity") or has(".local/bin/agy") or os.path.exists("/usr/bin/antigravity")
     return {
         "claude": bool(cl.get("accessToken")),
         "openai": bool(((read_json(os.path.join(HOME, ".codex", "auth.json")) or {}).get("tokens") or {}).get("access_token")),
         "opencode": has(".local/share/opencode/opencode.db"),
         "antigravity": bool(ag),
-        "conductor": bool(_conductor_token()),
+        "conductor": bool(_conductor_token()) or has(".conductor/server-port"),
         "openrouter": bool(os.environ.get("OPENROUTER_API_KEY")) or has(".config/omarchy/openrouter/key")
                       or has(".config/openrouter/key"),
     }

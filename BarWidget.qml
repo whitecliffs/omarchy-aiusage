@@ -196,7 +196,7 @@ Panel {
     persistPluginSetting("barLabel", modes[(modes.indexOf(labelMode) + 1) % modes.length])
   }
 
-  function refresh() { service.refreshAll(); service.detect() }
+  function refresh(force) { service.refreshAll(force !== false); service.detect() }
 
   function openTab(name) {
     if (tabs.indexOf(name) === -1) return
@@ -235,7 +235,7 @@ Panel {
     // First run (nothing tracked yet) lands on SETUP; otherwise the first provider.
     tab = tracked.length === 0 ? "setup" : tracked[0]
     if (panelFlick) panelFlick.contentY = 0
-    root.refresh()
+    root.refresh(false)
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
@@ -460,7 +460,7 @@ Panel {
             foreground: hero.foreground
             fontFamily: hero.fontFamily
             enabled: !service.busy[pv.pid]
-            onClicked: service.refreshOne(pv.pid)
+            onClicked: service.refreshOne(pv.pid, true)
 
             RotationAnimation on rotation {
               running: service.busy[pv.pid] === true
@@ -781,7 +781,7 @@ Panel {
 
       Text {
         width: parent.width
-        text: "Logins are read from each tool's own credential file and are never modified. Warning level and the OpenRouter key command are in the widget's settings."
+        text: "Each provider uses its existing login. Claude Code renews its saved login when needed. Warning level and the OpenRouter key command are in the widget's settings."
         textFormat: Text.PlainText
         color: root.dim
         font.family: root.fontFamily

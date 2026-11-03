@@ -34,8 +34,9 @@ Item {
     return v === undefined || v === null ? fallback : v
   }
 
-  function optsJson() {
+  function optsJson(force) {
     return JSON.stringify({
+      forceRefresh: force === true,
       lowBalance: setting("lowBalance", 5),
       keyCommand: String(setting("keyCommand", ""))
     })
@@ -56,16 +57,16 @@ Item {
     return null
   }
 
-  function refreshOne(id) {
+  function refreshOne(id, force) {
     var p = procFor(id)
     if (!p || p.running || helperPath === "") return
     busy = copyWith(busy, id, true)
-    p.command = ["python3", "-I", helperPath, id, optsJson()]
+    p.command = ["python3", "-I", helperPath, id, optsJson(force)]
     p.running = true
   }
 
-  function refreshAll() {
-    for (var i = 0; i < enabled.length; i++) refreshOne(enabled[i])
+  function refreshAll(force) {
+    for (var i = 0; i < enabled.length; i++) refreshOne(enabled[i], force)
   }
 
   function detect() {
