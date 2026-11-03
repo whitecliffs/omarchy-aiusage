@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "id": "jim.aiusage",
+  "name": "AI Usage",
+  "version": "1.0.0",
+  "author": "Jim",
+  "license": "MIT",
+  "description": "Live usage for your AI subscriptions in the bar: Claude, OpenAI (ChatGPT/Codex), OpenCode Go/Zen, Antigravity, Conductor (AI Junction) and OpenRouter, with a tabbed popup and a setup tab to pick what to track.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "barWidget": {
+    "displayName": "AI Usage",
+    "description": "Rate-limit windows, spend and credit for each AI subscription you track. Click for a tab per provider; the SETUP tab chooses which providers appear.",
+    "category": "AI",
+    "aliases": ["ai", "usage", "claude", "codex", "opencode", "antigravity", "conductor", "openrouter"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "providers": [],
+      "refreshIntervalSec": 120,
+      "barLabel": "All",
+      "usageDisplay": "Used",
+      "warnPct": 90
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec", "type": "integer", "label": "Refresh interval (seconds)",
+        "min": 30, "max": 3600, "step": 30, "defaultValue": 120
+      },
+      {
+        "key": "barLabel", "type": "enum", "label": "Bar label",
+        "options": ["All", "Worst", "Cycle", "Icon only"], "defaultValue": "All",
+        "description": "All: one figure per tracked provider. Worst: only the most-used window. Cycle: one provider every five seconds. Icon only: just the icon."
+      },
+      {
+        "key": "usageDisplay", "type": "enum", "label": "Usage display",
+        "options": ["Used", "Remaining"], "defaultValue": "Used",
+        "description": "Show used or remaining percentages in the bar and meters. Warnings always indicate usage near the limit."
+      },
+      {
+        "key": "warnPct", "type": "integer", "label": "Warn at (% used)",
+        "min": 50, "max": 100, "step": 5, "defaultValue": 90,
+        "description": "Turn the bar and meters urgent at or above this usage."
+      },
+      {
+        "key": "lowBalance", "type": "number", "label": "OpenRouter low balance ($)",
+        "min": 0, "max": 100000, "step": 1, "defaultValue": 5
+      },
+      {
+        "key": "keyCommand", "type": "string", "label": "OpenRouter key command",
+        "defaultValue": "",
+        "description": "Optional command that prints the key, e.g. 'pass show openrouter/api-key'. Empty: OPENROUTER_API_KEY or ~/.config/omarchy/openrouter/key."
+      }
+    ]
+  }
+}
