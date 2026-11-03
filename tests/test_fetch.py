@@ -41,8 +41,18 @@ class UsageTests(unittest.TestCase):
                   for name, remaining in [("Gemini Models", .75), ("Claude and GPT models", .74), ("Gemini 4 Argon", .18)]]
         windows = usage._ag_parse_quota_groups(groups)
         self.assertEqual(len({w["label"] for w in windows}), 3)
-        self.assertEqual(windows[0]["label"], "Gemini 4 Argon (Weekly)")
+        self.assertEqual(windows[2]["label"], "Gemini 4 Argon (Weekly)")
         self.assertEqual(usage.worst(windows), 82)
+
+    def test_antigravity_pairs_windows_by_model_family(self):
+        groups = [{"displayName": name, "buckets": [
+            {"window": "weekly", "remainingFraction": weekly},
+            {"window": "5h", "remainingFraction": session}]}
+            for name, weekly, session in [("Gemini Models", .75, .92), ("Claude and GPT models", .74, 1)]]
+        windows = usage._ag_parse_quota_groups(groups)
+        self.assertEqual([w["label"] for w in windows], [
+            "Gemini (5h)", "Gemini (Weekly)", "Claude/GPT (5h)", "Claude/GPT (Weekly)"])
+        self.assertEqual(usage.worst(windows), 26)
 
     def test_missing_quota_is_unknown(self):
         windows = usage._ag_parse_quota_groups([{"displayName": "Gemini Models", "buckets": [{"window": "5h"}]}])

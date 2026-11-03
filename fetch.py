@@ -545,7 +545,8 @@ def _ag_parse_quota_groups(groups):
             prefix = "Claude/GPT"
         else:
             prefix = g_name or "Model"
-        for b in group.get("buckets", []):
+        buckets = [b for b in group.get("buckets", []) if isinstance(b, dict)]
+        for b in sorted(buckets, key=lambda b: (0 if "5h" in b.get("window", "").lower() else 1)):
             if not isinstance(b, dict):
                 continue
             w = b.get("window", "")
@@ -555,7 +556,6 @@ def _ag_parse_quota_groups(groups):
             pct = max(0.0, min(100.0, round((1.0 - float(rem)) * 100, 1))) if rem is not None else -1
             reset_epoch = iso_to_epoch(b.get("resetTime"))
             wins.append(window(label, pct, reset_epoch))
-    wins.sort(key=lambda x: -x["pct"])
     return wins
 
 
