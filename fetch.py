@@ -30,6 +30,8 @@ import os
 import re
 import shutil
 import subprocess
+import stat
+import tempfile
 import sys
 import time
 import urllib.error
@@ -112,13 +114,51 @@ def read_json(path):
         return None
 
 
-def write_json(path, data):
+def prepare_cache():
+    # Protect existing caches before even a fresh-cache return. Directory and
+    # file descriptors avoid following cache symlinks while repairing modes.
+    os.makedirs(CACHE, mode=0o700, exist_ok=True)
+    directory = os.open(CACHE, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
+        if os.fstat(directory).st_uid != os.geteuid():
+            raise PermissionError("Usage cache must belong to the current user")
+        os.fchmod(directory, 0o700)
+        for name in os.listdir(directory):
+            if not name.endswith((".json", ".lock")):
+                continue
+            try:
+                fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory)
+            except FileNotFoundError:
+                continue  # Another helper may have replaced this cache entry.
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+                    raise PermissionError("Usage cache files must be regular files owned by the current user")
+                os.fchmod(fd, 0o600)
+            finally:
+                os.close(fd)
+    finally:
+        os.close(directory)
+
+
+def write_json(path, data):
+    temporary_path = None
+    try:
+        prepare_cache()
+        fd, temporary_path = tempfile.mkstemp(prefix=".cache-", suffix=".tmp", dir=os.path.dirname(path))
+        with os.fdopen(fd, "w") as f:
+            os.fchmod(f.fileno(), 0o600)
             json.dump(data, f)
+        os.replace(temporary_path, path)
+        temporary_path = None
     except OSError:
         pass
+    finally:
+        if temporary_path is not None:
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
 
 
 def err_for(status, name):
@@ -139,7 +179,7 @@ def _claude_credentials_path():
 def _claude_refresh_oauth(previous, force=False):
     # Let Claude Code perform token rotation and persist its own login. A lock
     # serializes helper instances, and re-reading avoids refreshing an old token.
-    os.makedirs(CACHE, exist_ok=True)
+    os.makedirs(CACHE, mode=0o700, exist_ok=True)
     fd = os.open(os.path.join(CACHE, "claude-refresh.lock"), os.O_RDWR | os.O_CREAT, 0o600)
     with os.fdopen(fd, "r+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -169,7 +209,7 @@ def _claude_refresh_oauth(previous, force=False):
 
 
 def claude(_opts):
-    os.makedirs(CACHE, exist_ok=True)
+    os.makedirs(CACHE, mode=0o700, exist_ok=True)
     cache_file = os.path.join(CACHE, "claude.json")
     sys_cache_file = os.path.join(SYS_AGENT_CACHE, "claude-limits.json")
 
@@ -297,7 +337,7 @@ def claude(_opts):
 
 # --------------------------------------------------------------------- OpenAI
 def openai(_opts):
-    os.makedirs(CACHE, exist_ok=True)
+    os.makedirs(CACHE, mode=0o700, exist_ok=True)
     cache_file = os.path.join(CACHE, "openai.json")
 
     cached = read_json(cache_file)
@@ -421,7 +461,7 @@ def opencode(_opts):
 
 # --------------------------------------------------------------- OpenRouter
 def openrouter(opts):
-    os.makedirs(CACHE, exist_ok=True)
+    os.makedirs(CACHE, mode=0o700, exist_ok=True)
     cache_file = os.path.join(CACHE, "openrouter.json")
 
     cached = read_json(cache_file)
@@ -549,13 +589,9 @@ def _ag_refresh_token(refresh_tok):
         status, data = http_json("https://oauth2.googleapis.com/token", body=body)
         if status == 200 and isinstance(data, dict) and data.get("access_token"):
             token = str(data["access_token"])
-            os.makedirs(CACHE, exist_ok=True)
-            fd = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as f:
-                os.fchmod(f.fileno(), 0o600)
-                json.dump({"identity": identity, "accessToken": token,
-                           "clientId": client_id, "clientSecret": client_secret,
-                           "expiresAt": now() + int(data.get("expires_in", 3600))}, f)
+            write_json(token_file, {"identity": identity, "accessToken": token,
+                                    "clientId": client_id, "clientSecret": client_secret,
+                                    "expiresAt": now() + int(data.get("expires_in", 3600))})
             return token
         # Other native clients embedded in agy may not match this login.
         if status not in (400, 401) or not isinstance(data, dict) or data.get("error") not in ("invalid_client", "unauthorized_client"):
@@ -654,7 +690,7 @@ def _ag_cached_result():
 
 
 def antigravity(_opts):
-    os.makedirs(CACHE, exist_ok=True)
+    os.makedirs(CACHE, mode=0o700, exist_ok=True)
     cache_file = os.path.join(CACHE, "antigravity.json")
 
     # If recent fresh cache exists (< 60s), reuse it
@@ -830,6 +866,7 @@ def main():
         opts = {}
     fn = PROVIDERS.get(name)
     try:
+        prepare_cache()
         out = fn(opts) if fn else fail("Unknown provider: %s" % name)
     except Exception as e:
         out = fail("Internal error in %s helper" % name, "%s: %s" % (type(e).__name__, str(e)[:100]))

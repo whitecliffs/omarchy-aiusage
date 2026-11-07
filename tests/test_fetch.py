@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,6 +20,68 @@ class UsageTests(unittest.TestCase):
         self.cache = patch.object(usage, "CACHE", self.directory.name)
         self.cache.start()
         self.addCleanup(self.cache.stop)
+
+    def test_private_cache_permissions_with_permissive_umasks(self):
+        for mask in (0o022, 0o000):
+            with self.subTest(umask=oct(mask)), tempfile.TemporaryDirectory() as parent:
+                cache = Path(parent) / "cache"
+                previous_umask = os.umask(mask)
+                try:
+                    with patch.object(usage, "CACHE", str(cache)):
+                        usage.write_json(str(cache / "openrouter.json"), {"balance": 12.5, "spent": 25.5})
+                finally:
+                    os.umask(previous_umask)
+                self.assertEqual(cache.stat().st_mode & 0o777, 0o700)
+                self.assertEqual((cache / "openrouter.json").stat().st_mode & 0o777, 0o600)
+                self.assertEqual(json.loads((cache / "openrouter.json").read_text()), {"balance": 12.5, "spent": 25.5})
+
+    def test_cached_read_repairs_legacy_permissions_before_return(self):
+        cache = Path(self.directory.name)
+        cached = usage.result(headline="$12.50")
+        for name in ["openrouter.json", "conductor.json", "claude-refresh.lock"]:
+            path = cache / name
+            path.write_text(json.dumps(cached))
+            path.chmod(0o666)
+        cache.chmod(0o755)
+        output = io.StringIO()
+        with patch.object(usage.sys, "argv", ["fetch.py", "openrouter"]), patch.object(usage.sys, "stdout", output), patch.object(usage, "http_json") as request:
+            usage.main()
+        self.assertEqual(json.loads(output.getvalue())["headline"], "$12.50")
+        request.assert_not_called()
+        self.assertEqual(cache.stat().st_mode & 0o777, 0o700)
+        for path in cache.iterdir():
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_failed_cache_replacement_keeps_old_private_reading(self):
+        path = Path(self.directory.name) / "openrouter.json"
+        path.write_text(json.dumps({"balance": 12.5}))
+        path.chmod(0o644)
+        with patch.object(usage.os, "replace", side_effect=OSError("simulated failure")):
+            usage.write_json(str(path), {"balance": 10})
+        self.assertEqual(json.loads(path.read_text()), {"balance": 12.5})
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(list(Path(self.directory.name).glob(".cache-*.tmp")), [])
+
+    def test_cache_directory_symlink_is_refused(self):
+        with tempfile.TemporaryDirectory() as parent:
+            target = Path(parent) / "target"
+            target.mkdir(mode=0o755)
+            link = Path(parent) / "link"
+            link.symlink_to(target, target_is_directory=True)
+            with patch.object(usage, "CACHE", str(link)):
+                with self.assertRaises(OSError):
+                    usage.prepare_cache()
+            self.assertEqual(target.stat().st_mode & 0o777, 0o755)
+
+    def test_cache_file_symlink_is_refused(self):
+        with tempfile.TemporaryDirectory() as parent:
+            target = Path(parent) / "outside.json"
+            target.write_text("{}")
+            target.chmod(0o644)
+            (Path(self.directory.name) / "openrouter.json").symlink_to(target)
+            with self.assertRaises(OSError):
+                usage.prepare_cache()
+            self.assertEqual(target.stat().st_mode & 0o777, 0o644)
 
     def test_claude_null_model_scopes(self):
         credentials = {"claudeAiOauth": {"accessToken": "fixture"}}
